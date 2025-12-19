@@ -1,0 +1,795 @@
+/**
+ * ============================================================================
+ * CORPORATE INVENTORY MANAGEMENT SYSTEM - GOOGLE APPS SCRIPT BACKEND
+ * ============================================================================
+ *
+ * This script provides a REST API for managing inventory, restock orders,
+ * transactions, and system logs using Google Sheets as the database.
+ *
+ * NOTE: SpreadsheetApp, ContentService, and Logger are Google Apps Script
+ * built-in globals that are automatically available in the Google Apps Script
+ * runtime environment. They do not need to be imported or declared.
+ *
+ * This file is NOT part of the Next.js application - it's deployed separately
+ * to Google Apps Script. Lint warnings about undeclared variables are expected
+ * and can be ignored.
+ *
+ * DEPLOYMENT INSTRUCTIONS:
+ * 1. Create a new Google Sheet
+ * 2. Go to Extensions > Apps Script
+ * 3. Delete any existing code and paste this entire script
+ * 4. Click Deploy > New deployment
+ * 5. Choose "Web app" as deployment type
+ * 6. Set "Execute as" to "Me"
+ * 7. Set "Who has access" to "Anyone"
+ * 8. Click Deploy and copy the Web App URL
+ * 9. Add the URL to your Next.js .env as NEXT_PUBLIC_GOOGLE_SHEETS_API_URL
+ *
+ * SHEET STRUCTURE (EXACT MAPPING):
+ * Create 4 tabs in your Google Sheet with these EXACT names and columns:
+ *
+ * 1. Inventory
+ *    - ID | Name | Category | Quantity | Total COGS | Cost Price |
+ *      Selling Price | Reorder Level | Warehouse | Last Updated
+ *
+ * 2. Restock
+ *    - ID | Item ID | Item Name | Quantity Added | Cost Price |
+ *      Total Cost | Timestamp | Reason
+ *
+ * 3. Transactions
+ *    - ID | Item ID | Item Name | Quantity | Cost Price | Selling Price |
+ *      Total Cost | Profit | Timestamp | Department
+ *
+ * 4. Logs
+ *    - ID | Operation | Item ID | Item Name | Details | Timestamp
+ */
+
+// ============================================================================
+// CONFIGURATION
+// ============================================================================
+
+const CONFIG = {
+  SHEET_NAMES: {
+    INVENTORY: "Inventory",
+    RESTOCK: "Restock",
+    TRANSACTIONS: "Transactions",
+    LOGS: "Logs",
+  },
+  HEADERS: {
+    INVENTORY: [
+      "ID",
+      "Name",
+      "Category",
+      "Quantity",
+      "Total COGS",
+      "Cost Price",
+      "Selling Price",
+      "Reorder Level",
+      "Warehouse",
+      "Last Updated",
+    ],
+    RESTOCK: ["ID", "Item ID", "Item Name", "Quantity Added", "Cost Price", "Total Cost", "Timestamp", "Reason"],
+    TRANSACTIONS: [
+      "ID",
+      "Item ID",
+      "Item Name",
+      "Quantity",
+      "Cost Price",
+      "Selling Price",
+      "Total Cost",
+      "Profit",
+      "Timestamp",
+      "Department",
+    ],
+    LOGS: ["ID", "Operation", "Item ID", "Item Name", "Details", "Timestamp"],
+  },
+}
+
+// ============================================================================
+// CORE SHEET SERVICE
+// ============================================================================
+
+class SheetService {
+  constructor(sheetName) {
+    const ss = SpreadsheetApp.getActiveSpreadsheet()
+    this.sheet = ss.getSheetByName(sheetName)
+
+    if (!this.sheet) {
+      throw new Error(`Sheet "${sheetName}" not found. Please create it first.`)
+    }
+
+    this.sheetName = sheetName
+  }
+
+  /**
+   * Initialize sheet with headers if if
+   */
+  initialize(headers) {
+    const lastRow = this.sheet.getLastRow()
+    if (lastRow === 0) {
+      this.sheet.appendRow(headers)
+      this.sheet.getRange(1, 1, 1, headers.length).setFontWeight("bold").setBackground("#f1f5f9")
+      console.log(`Initialized ${this.sheetName} sheet with headers`)
+    }
+  }
+
+  /**
+   * Read all rows
+   */
+  read() {
+    try {
+      const lastRow = this.sheet.getLastRow()
+      if (lastRow <= 1) return []
+
+      const range = this.sheet.getRange(2, 1, lastRow - 1, this.sheet.getLastColumn())
+      const values = range.getValues()
+      const headers = this.sheet.getRange(1, 1, 1, this.sheet.getLastColumn()).getValues()[0]
+
+      const data = values
+        .map((row) => {
+          const obj = {}
+          headers.forEach((header, index) => {
+            obj[header] = row[index]
+          })
+          return obj
+        })
+        .filter((row) => row.ID !== "") // Filter out empty rows
+
+      return data
+    } catch (error) {
+      console.log(`Error reading ${this.sheetName}: ${error.message}`)
+      throw error
+    }
+  }
+
+  /**
+   * Write new row
+   */
+  write(data) {
+    try {
+      const headers = this.sheet.getRange(1, 1, 1, this.sheet.getLastColumn()).getValues()[0]
+      const row = headers.map((header) => (data[header] !== undefined ? data[header] : ""))
+
+      this.sheet.appendRow(row)
+
+      return data
+    } catch (error) {
+      console.log(`Error writing to ${this.sheetName}: ${error.message}`)
+      throw error
+    }
+  }
+
+  /**
+   * Update existing row by ID
+   */
+  update(id, updates) {
+    try {
+      const data = this.read()
+      const rowIndex = data.findIndex((row) => row.ID === id)
+
+      if (rowIndex === -1) {
+        throw new Error(`Record with ID ${id} not found in ${this.sheetName}`)
+      }
+
+      const headers = this.sheet.getRange(1, 1, 1, this.sheet.getLastColumn()).getValues()[0]
+      const actualRowIndex = rowIndex + 2 // +1 for header, +1 for 0-based index
+
+      // Update specific columns
+      Object.keys(updates).forEach((key) => {
+        const colIndex = headers.indexOf(key)
+        if (colIndex !== -1) {
+          this.sheet.getRange(actualRowIndex, colIndex + 1).setValue(updates[key])
+        }
+      })
+
+      return { ...data[rowIndex], ...updates }
+    } catch (error) {
+      console.log(`Error updating ${this.sheetName}: ${error.message}`)
+      throw error
+    }
+  }
+
+  /**
+   * Delete row by ID
+   */
+  delete(id) {
+    try {
+      const data = this.read()
+      const rowIndex = data.findIndex((row) => row.ID === id)
+
+      if (rowIndex === -1) {
+        throw new Error(`Record with ID ${id} not found in ${this.sheetName}`)
+      }
+
+      const actualRowIndex = rowIndex + 2 // +1 for header, +1 for 0-based index
+      this.sheet.deleteRow(actualRowIndex)
+
+      return { success: true, id }
+    } catch (error) {
+      console.log(`Error deleting from ${this.sheetName}: ${error.message}`)
+      throw error
+    }
+  }
+
+  /**
+   * Find by ID
+   */
+  findById(id) {
+    const data = this.read()
+    return data.find((row) => row.ID === id)
+  }
+
+  /**
+   * Generate next ID
+   */
+  generateId() {
+    const data = this.read()
+    if (data.length === 0) return "1"
+
+    const maxId = Math.max(...data.map((row) => Number.parseInt(row.ID) || 0))
+    return String(maxId + 1)
+  }
+}
+
+// ============================================================================
+// VALIDATION SERVICE
+// ============================================================================
+
+class ValidationService {
+  static validateInventoryItem(data) {
+    const errors = []
+
+    if (!data.Name || data.Name.trim() === "") {
+      errors.push("Name is required")
+    }
+
+    if (data.Quantity === undefined || data.Quantity === null) {
+      errors.push("Quantity is required")
+    } else if (typeof data.Quantity !== "number" || data.Quantity < 0) {
+      errors.push("Quantity must be a non-negative number")
+    }
+
+    if (data["Cost Price"] !== undefined && data["Cost Price"] !== null) {
+      if (typeof data["Cost Price"] !== "number" || data["Cost Price"] < 0) {
+        errors.push("Cost Price must be a non-negative number")
+      }
+    }
+
+    if (data["Selling Price"] !== undefined && data["Selling Price"] !== null) {
+      if (typeof data["Selling Price"] !== "number" || data["Selling Price"] < 0) {
+        errors.push("Selling Price must be a non-negative number")
+      }
+    }
+
+    if (data["Reorder Level"] !== undefined && data["Reorder Level"] !== null) {
+      if (typeof data["Reorder Level"] !== "number" || data["Reorder Level"] < 0) {
+        errors.push("Reorder Level must be a non-negative number")
+      }
+    }
+
+    return {
+      valid: errors.length === 0,
+      errors,
+    }
+  }
+
+  static validateRestockOrder(data) {
+    const errors = []
+
+    if (!data["Item ID"]) {
+      errors.push("Item ID is required")
+    }
+
+    if (data["Quantity Added"] === undefined || data["Quantity Added"] === null) {
+      errors.push("Quantity Added is required")
+    } else if (typeof data["Quantity Added"] !== "number" || data["Quantity Added"] <= 0) {
+      errors.push("Quantity Added must be a positive number")
+    }
+
+    if (data["Cost Price"] !== undefined && data["Cost Price"] !== null) {
+      if (typeof data["Cost Price"] !== "number" || data["Cost Price"] < 0) {
+        errors.push("Cost Price must be a non-negative number")
+      }
+    }
+
+    return {
+      valid: errors.length === 0,
+      errors,
+    }
+  }
+
+  static validateSale(data) {
+    const errors = []
+
+    if (!data["Item ID"]) {
+      errors.push("Item ID is required")
+    }
+
+    if (data.Quantity === undefined || data.Quantity === null) {
+      errors.push("Quantity is required")
+    } else if (typeof data.Quantity !== "number" || data.Quantity <= 0) {
+      errors.push("Quantity must be a positive number")
+    }
+
+    return {
+      valid: errors.length === 0,
+      errors,
+    }
+  }
+}
+
+// ============================================================================
+// LOG SERVICE
+// ============================================================================
+
+class LogService {
+  static log(operation, itemId, itemName, details) {
+    try {
+      const logSheet = new SheetService(CONFIG.SHEET_NAMES.LOGS)
+      logSheet.initialize(CONFIG.HEADERS.LOGS)
+
+      const id = logSheet.generateId()
+
+      logSheet.write({
+        ID: id,
+        Operation: operation,
+        "Item ID": itemId || "",
+        "Item Name": itemName || "",
+        Details: details,
+        Timestamp: new Date(),
+      })
+    } catch (error) {
+      // Silent fail to prevent blocking operations
+      console.error("Logging failed:", error)
+    }
+  }
+
+  static info(operation, itemId, itemName, message) {
+    this.log(operation, itemId, itemName, `INFO: ${message}`)
+  }
+
+  static error(operation, itemId, itemName, message) {
+    this.log(operation, itemId, itemName, `ERROR: ${message}`)
+  }
+
+  static warn(operation, itemId, itemName, message) {
+    this.log(operation, itemId, itemName, `WARN: ${message}`)
+  }
+}
+
+// ============================================================================
+// INVENTORY OPERATIONS
+// ============================================================================
+
+function handleInventoryGet() {
+  try {
+    const inventorySheet = new SheetService(CONFIG.SHEET_NAMES.INVENTORY)
+    inventorySheet.initialize(CONFIG.HEADERS.INVENTORY)
+
+    const data = inventorySheet.read()
+    return createResponse(200, { data })
+  } catch (error) {
+    return createResponse(500, { error: error.message })
+  }
+}
+
+function handleInventoryCreate(payload) {
+  try {
+    const inventorySheet = new SheetService(CONFIG.SHEET_NAMES.INVENTORY)
+    inventorySheet.initialize(CONFIG.HEADERS.INVENTORY)
+
+    // Validate
+    const validation = ValidationService.validateInventoryItem(payload)
+    if (!validation.valid) {
+      return createResponse(400, { error: validation.errors.join(", ") })
+    }
+
+    const id = inventorySheet.generateId()
+
+    // Calculate Total COGS
+    const totalCOGS = (payload["Cost Price"] || 0) * (payload.Quantity || 0)
+
+    const item = {
+      ID: id,
+      Name: payload.Name,
+      Category: payload.Category || "",
+      Quantity: payload.Quantity,
+      "Total COGS": totalCOGS,
+      "Cost Price": payload["Cost Price"] || 0,
+      "Selling Price": payload["Selling Price"] || 0,
+      "Reorder Level": payload["Reorder Level"] || 0,
+      Warehouse: payload.Warehouse || "",
+      "Last Updated": new Date(),
+    }
+
+    inventorySheet.write(item)
+    LogService.info("inventory_create", id, payload.Name, `Created new inventory item: ${payload.Name}`)
+
+    return createResponse(200, { data: item })
+  } catch (error) {
+    return createResponse(500, { error: error.message })
+  }
+}
+
+function handleInventoryUpdate(payload) {
+  try {
+    const inventorySheet = new SheetService(CONFIG.SHEET_NAMES.INVENTORY)
+
+    if (!payload.ID) {
+      return createResponse(400, { error: "ID is required" })
+    }
+
+    // Validate
+    const validation = ValidationService.validateInventoryItem(payload)
+    if (!validation.valid) {
+      return createResponse(400, { error: validation.errors.join(", ") })
+    }
+
+    // Get existing item
+    const existingItem = inventorySheet.findById(payload.ID)
+    if (!existingItem) {
+      return createResponse(404, { error: "Item not found" })
+    }
+
+    // Calculate new Total COGS if quantity or cost price changed
+    const newQuantity = payload.Quantity !== undefined ? payload.Quantity : existingItem.Quantity
+    const newCostPrice = payload["Cost Price"] !== undefined ? payload["Cost Price"] : existingItem["Cost Price"]
+    const totalCOGS = newQuantity * newCostPrice
+
+    const updates = {
+      Name: payload.Name || existingItem.Name,
+      Category: payload.Category !== undefined ? payload.Category : existingItem.Category,
+      Quantity: newQuantity,
+      "Total COGS": totalCOGS,
+      "Cost Price": newCostPrice,
+      "Selling Price":
+        payload["Selling Price"] !== undefined ? payload["Selling Price"] : existingItem["Selling Price"],
+      "Reorder Level":
+        payload["Reorder Level"] !== undefined ? payload["Reorder Level"] : existingItem["Reorder Level"],
+      Warehouse: payload.Warehouse !== undefined ? payload.Warehouse : existingItem.Warehouse,
+      "Last Updated": new Date(),
+    }
+
+    const updatedItem = inventorySheet.update(payload.ID, updates)
+
+    // Log the reason if provided
+    if (payload.Reason) {
+      LogService.info("inventory_update", payload.ID, updates.Name, `Updated: ${payload.Reason}`)
+    } else {
+      LogService.info("inventory_update", payload.ID, updates.Name, "Updated inventory item")
+    }
+
+    return createResponse(200, { data: updatedItem })
+  } catch (error) {
+    return createResponse(500, { error: error.message })
+  }
+}
+
+function handleInventoryDelete(payload) {
+  try {
+    const inventorySheet = new SheetService(CONFIG.SHEET_NAMES.INVENTORY)
+
+    if (!payload.id) {
+      return createResponse(400, { error: "ID is required" })
+    }
+
+    const item = inventorySheet.findById(payload.id)
+    if (!item) {
+      return createResponse(404, { error: "Item not found" })
+    }
+
+    inventorySheet.delete(payload.id)
+    LogService.info("inventory_delete", payload.id, item.Name, `Deleted inventory item: ${item.Name}`)
+
+    return createResponse(200, { data: { success: true, id: payload.id } })
+  } catch (error) {
+    return createResponse(500, { error: error.message })
+  }
+}
+
+// ============================================================================
+// RESTOCK OPERATIONS
+// ============================================================================
+
+function handleRestockGet() {
+  try {
+    const restockSheet = new SheetService(CONFIG.SHEET_NAMES.RESTOCK)
+    restockSheet.initialize(CONFIG.HEADERS.RESTOCK)
+
+    const data = restockSheet.read()
+    return createResponse(200, { data })
+  } catch (error) {
+    return createResponse(500, { error: error.message })
+  }
+}
+
+function handleRestockCreate(payload) {
+  try {
+    const restockSheet = new SheetService(CONFIG.SHEET_NAMES.RESTOCK)
+    const inventorySheet = new SheetService(CONFIG.SHEET_NAMES.INVENTORY)
+
+    restockSheet.initialize(CONFIG.HEADERS.RESTOCK)
+
+    // Validate
+    const validation = ValidationService.validateRestockOrder(payload)
+    if (!validation.valid) {
+      return createResponse(400, { error: validation.errors.join(", ") })
+    }
+
+    // Get inventory item
+    const inventoryItem = inventorySheet.findById(payload["Item ID"])
+    if (!inventoryItem) {
+      return createResponse(404, { error: "Inventory item not found" })
+    }
+
+    const id = restockSheet.generateId()
+    const quantityAdded = payload["Quantity Added"]
+    const costPrice = payload["Cost Price"] || inventoryItem["Cost Price"] || 0
+    const totalCost = quantityAdded * costPrice
+
+    const restockOrder = {
+      ID: id,
+      "Item ID": payload["Item ID"],
+      "Item Name": inventoryItem.Name,
+      "Quantity Added": quantityAdded,
+      "Cost Price": costPrice,
+      "Total Cost": totalCost,
+      Timestamp: new Date(),
+      Reason: payload.Reason || "",
+    }
+
+    restockSheet.write(restockOrder)
+
+    // Update inventory quantity and Total COGS
+    const newQuantity = inventoryItem.Quantity + quantityAdded
+    const newTotalCOGS = inventoryItem["Total COGS"] + totalCost
+
+    inventorySheet.update(payload["Item ID"], {
+      Quantity: newQuantity,
+      "Total COGS": newTotalCOGS,
+      "Cost Price": costPrice, // Update cost price to latest
+      "Last Updated": new Date(),
+    })
+
+    LogService.info(
+      "restock_create",
+      payload["Item ID"],
+      inventoryItem.Name,
+      `Restocked ${quantityAdded} units. Reason: ${payload.Reason || "N/A"}`,
+    )
+
+    return createResponse(200, { data: restockOrder })
+  } catch (error) {
+    return createResponse(500, { error: error.message })
+  }
+}
+
+// ============================================================================
+// TRANSACTION/POS OPERATIONS
+// ============================================================================
+
+function handleTransactionGet() {
+  try {
+    const transactionSheet = new SheetService(CONFIG.SHEET_NAMES.TRANSACTIONS)
+    transactionSheet.initialize(CONFIG.HEADERS.TRANSACTIONS)
+
+    const data = transactionSheet.read()
+    return createResponse(200, { data })
+  } catch (error) {
+    return createResponse(500, { error: error.message })
+  }
+}
+
+function handleSaleCreate(payload) {
+  try {
+    const transactionSheet = new SheetService(CONFIG.SHEET_NAMES.TRANSACTIONS)
+    const inventorySheet = new SheetService(CONFIG.SHEET_NAMES.INVENTORY)
+
+    transactionSheet.initialize(CONFIG.HEADERS.TRANSACTIONS)
+
+    // Validate
+    const validation = ValidationService.validateSale(payload)
+    if (!validation.valid) {
+      return createResponse(400, { error: validation.errors.join(", ") })
+    }
+
+    // Get inventory item
+    const inventoryItem = inventorySheet.findById(payload["Item ID"])
+    if (!inventoryItem) {
+      return createResponse(404, { error: "Inventory item not found" })
+    }
+
+    // Check stock availability
+    if (inventoryItem.Quantity < payload.Quantity) {
+      return createResponse(400, { error: "Insufficient stock" })
+    }
+
+    const id = transactionSheet.generateId()
+    const quantity = payload.Quantity
+    const costPrice = inventoryItem["Cost Price"] || 0
+    const sellingPrice = payload["Selling Price"] || inventoryItem["Selling Price"] || 0
+    const totalCost = quantity * costPrice
+    const totalRevenue = quantity * sellingPrice
+    const profit = totalRevenue - totalCost
+
+    const transaction = {
+      ID: id,
+      "Item ID": payload["Item ID"],
+      "Item Name": inventoryItem.Name,
+      Quantity: quantity,
+      "Cost Price": costPrice,
+      "Selling Price": sellingPrice,
+      "Total Cost": totalCost,
+      Profit: profit,
+      Timestamp: new Date(),
+      Department: payload.Department || "",
+    }
+
+    transactionSheet.write(transaction)
+
+    // Update inventory - reduce quantity and adjust Total COGS
+    const newQuantity = inventoryItem.Quantity - quantity
+    const newTotalCOGS = inventoryItem["Total COGS"] - totalCost
+
+    inventorySheet.update(payload["Item ID"], {
+      Quantity: newQuantity,
+      "Total COGS": Math.max(0, newTotalCOGS), // Prevent negative
+      "Last Updated": new Date(),
+    })
+
+    LogService.info(
+      "sale_create",
+      payload["Item ID"],
+      inventoryItem.Name,
+      `Sold ${quantity} units. Profit: ${profit}. Department: ${payload.Department || "N/A"}`,
+    )
+
+    return createResponse(200, { data: transaction })
+  } catch (error) {
+    return createResponse(500, { error: error.message })
+  }
+}
+
+// ============================================================================
+// LOG OPERATIONS
+// ============================================================================
+
+function handleLogGet() {
+  try {
+    const logSheet = new SheetService(CONFIG.SHEET_NAMES.LOGS)
+    logSheet.initialize(CONFIG.HEADERS.LOGS)
+
+    const data = logSheet.read()
+    return createResponse(200, { data })
+  } catch (error) {
+    return createResponse(500, { error: error.message })
+  }
+}
+
+// ============================================================================
+// CASH FLOW / ANALYTICS
+// ============================================================================
+
+function handleCashFlowGet(params) {
+  try {
+    const transactionSheet = new SheetService(CONFIG.SHEET_NAMES.TRANSACTIONS)
+    const restockSheet = new SheetService(CONFIG.SHEET_NAMES.RESTOCK)
+
+    const transactions = transactionSheet.read()
+    const restocks = restockSheet.read()
+
+    // Filter by date if provided
+    let filteredTransactions = transactions
+    let filteredRestocks = restocks
+
+    if (params.startDate) {
+      const startDate = new Date(params.startDate)
+      filteredTransactions = transactions.filter((t) => new Date(t.Timestamp) >= startDate)
+      filteredRestocks = restocks.filter((r) => new Date(r.Timestamp) >= startDate)
+    }
+
+    if (params.endDate) {
+      const endDate = new Date(params.endDate)
+      filteredTransactions = filteredTransactions.filter((t) => new Date(t.Timestamp) <= endDate)
+      filteredRestocks = filteredRestocks.filter((r) => new Date(r.Timestamp) <= endDate)
+    }
+
+    // Calculate totals
+    const totalRevenue = filteredTransactions.reduce((sum, t) => sum + (t["Selling Price"] * t.Quantity || 0), 0)
+    const totalProfit = filteredTransactions.reduce((sum, t) => sum + (t.Profit || 0), 0)
+    const totalCostOfSales = filteredTransactions.reduce((sum, t) => sum + (t["Total Cost"] || 0), 0)
+    const totalRestockCost = filteredRestocks.reduce((sum, r) => sum + (r["Total Cost"] || 0), 0)
+
+    const data = {
+      totalRevenue,
+      totalProfit,
+      totalCostOfSales,
+      totalRestockCost,
+      netCashFlow: totalRevenue - totalRestockCost,
+      transactionCount: filteredTransactions.length,
+      restockCount: filteredRestocks.length,
+    }
+
+    return createResponse(200, { data })
+  } catch (error) {
+    return createResponse(500, { error: error.message })
+  }
+}
+
+// ============================================================================
+// MAIN HANDLER (doPost)
+// ============================================================================
+
+function doPost(e) {
+  try {
+    const payload = JSON.parse(e.postData.contents)
+    const action = payload.action
+
+    switch (action) {
+      // Inventory
+      case "inventory_get":
+        return handleInventoryGet()
+      case "inventory_create":
+        return handleInventoryCreate(payload.data)
+      case "inventory_update":
+        return handleInventoryUpdate(payload.data)
+      case "inventory_delete":
+        return handleInventoryDelete(payload.data)
+
+      // Restock
+      case "restock_get":
+        return handleRestockGet()
+      case "restock_create":
+        return handleRestockCreate(payload.data)
+
+      // Transactions/Sales
+      case "transaction_get":
+        return handleTransactionGet()
+      case "sale_create":
+        return handleSaleCreate(payload.data)
+
+      // Logs
+      case "log_get":
+        return handleLogGet()
+
+      // Cash Flow
+      case "cashflow_get":
+        return handleCashFlowGet(payload.data || {})
+
+      default:
+        return createResponse(400, { error: `Unknown action: ${action}` })
+    }
+  } catch (error) {
+    return createResponse(500, { error: error.message })
+  }
+}
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+function createResponse(statusCode, body) {
+  return ContentService.createTextOutput(JSON.stringify({ statusCode, ...body })).setMimeType(
+    ContentService.MimeType.JSON,
+  )
+}
+
+// ============================================================================
+// TEST FUNCTION (Optional - for debugging)
+// ============================================================================
+
+function testInitialize() {
+  const sheets = [
+    { name: CONFIG.SHEET_NAMES.INVENTORY, headers: CONFIG.HEADERS.INVENTORY },
+    { name: CONFIG.SHEET_NAMES.RESTOCK, headers: CONFIG.HEADERS.RESTOCK },
+    { name: CONFIG.SHEET_NAMES.TRANSACTIONS, headers: CONFIG.HEADERS.TRANSACTIONS },
+    { name: CONFIG.SHEET_NAMES.LOGS, headers: CONFIG.HEADERS.LOGS },
+  ]
+
+  sheets.forEach((s) => {
+    const service = new SheetService(s.name)
+    service.initialize(s.headers)
+  })
+
+  console.log("All sheets initialized successfully!")
+}
