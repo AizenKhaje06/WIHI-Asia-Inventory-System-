@@ -8,8 +8,8 @@ export const metadata = {
 
 export default function InventoryPage() {
   return (
-    <div className="min-h-screen bg-background">
-      <div className="container mx-auto px-4 py-8">
+    <div className="min-h-screen bg-background p-4 lg:p-6">
+      <div className="container mx-auto px-4 py-8 max-w-7xl">
         <InventoryHeader />
         <InventoryList />
       </div>

@@ -57,7 +57,7 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
               : "lg:pl-64 pt-14 lg:pt-0" // Expanded sidebar width + mobile header
         }
       >
-        <main className={isDashboard ? "" : "p-4 lg:p-6"}>{children}</main>
+        <main>{children}</main>
       </div>
     </div>
   )

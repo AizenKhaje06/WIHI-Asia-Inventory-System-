@@ -85,7 +85,7 @@ export function InventoryList() {
     <>
       <div className="space-y-6">
         {/* Stats */}
-        <div className="grid md:grid-cols-3 gap-4">
+        <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
           <Card className="border-border bg-card">
             <CardHeader className="pb-3">
               <CardDescription className="text-muted-foreground">Total Items</CardDescription>
