@@ -143,7 +143,7 @@ export function Sidebar() {
       <aside
         className={cn(
           "hidden lg:fixed lg:inset-y-0 lg:flex lg:flex-col lg:border-r lg:border-slate-200 lg:bg-white lg:shadow-sm lg:transition-all lg:duration-200",
-          isCollapsed ? "lg:w-16" : "lg:w-64",
+          isCollapsed ? "lg:w-16" : "lg:w-50",
         )}
       >
         <div className="flex flex-col h-full">
